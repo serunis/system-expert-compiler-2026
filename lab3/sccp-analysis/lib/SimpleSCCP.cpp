@@ -85,7 +85,18 @@ SimpleSCCPAnalysis::InstructionVisitor::visitPHINode(const PHINode &I)
 {
   ConstantValue NewValue = ConstantValue::top();
   //******************************** ASSIGNMENT ********************************
+  const BasicBlock *ThisBlock = I.getParent();
+  for (unsigned int Idx = 0; Idx < I.getNumIncomingValues(); ++Idx)
+  {
+    const BasicBlock *IncomingBlock = I.getIncomingBlock(Idx);
+    CFGEdge IncomingEdge{IncomingBlock, ThisBlock};
+    if (!ThePass.isExecutableEdge(IncomingEdge))
+      continue;
 
+    Value *IncomingValue = I.getIncomingValue(Idx);
+    ConstantValue IncomingCV = ThePass.getConstantValue(*IncomingValue);
+    NewValue = NewValue.meet(IncomingCV);
+  }
   //****************************** ASSIGNMENT END ******************************
   return NewValue;
 }
@@ -278,7 +289,75 @@ void SimpleSCCPAnalysis::analyze(Function &F)
   {
     //* ASSIGNMENT - Algorithm 1
     //******************************* ASSIGNMENT *******************************
+    if (!CFGWorkset.empty())
+    {
+      // Pop one CFG edge.
+      CFGEdge Edge = *CFGWorkset.begin();
+      CFGWorkset.erase(Edge);
 
+      const BasicBlock *DestBlock = Edge.To;
+      if (!DestBlock)
+        continue;
+
+      bool FirstVisit = !isExecutableBlock(*DestBlock);
+      errs() << "[CFG-pop] " << Edge << (FirstVisit ? "  (first visit)\n" : "  (revisit)\n");
+
+      // Mark the edge as executable.
+      ExecutableEdges.insert(Edge);
+
+      // PHI nodes must be re-visited whenever a new incoming CFG edge becomes
+      // executable.
+      for (const Instruction &I : *DestBlock)
+      {
+        if (!isa<PHINode>(&I))
+          break;
+        visit(I);
+      }
+
+      // Visit non-PHI instructions only when the block is reached for the
+      // first time.
+      if (FirstVisit)
+      {
+        for (const Instruction &I : *DestBlock)
+        {
+          if (isa<PHINode>(&I))
+            continue;
+          visit(I);
+        }
+      }
+
+      // If the block has a unique successor that is not yet executable,
+      // propagate reachability directly. Conditional branches are handled
+      // inside visitBranchInst.
+      const Instruction *Terminator = DestBlock->getTerminator();
+      if (Terminator && Terminator->getNumSuccessors() == 1)
+      {
+        const BasicBlock *Succ = Terminator->getSuccessor(0);
+        CFGEdge NextEdge{DestBlock, Succ};
+        if (ExecutableEdges.count(NextEdge) == 0)
+          CFGWorkset.insert(NextEdge);
+      }
+    }
+    else
+    {
+      // Pop one SSA element.
+      const Instruction *I = *SSAWorkset.begin();
+      SSAWorkset.erase(I);
+      errs() << "[SSA-pop] " << getId(I) << "\n";
+
+      if (isa<PHINode>(I))
+      {
+        visit(*I);
+      }
+      else
+      {
+        // Non-PHI instructions matter only if their block is reachable.
+        if (isExecutableBlock(*I->getParent()))
+          visit(*I);
+        else
+          errs() << "    (parent block not executable, skipped)\n";
+      }
+    }
     //***************************** ASSIGNMENT END *****************************
   }
 }
@@ -295,7 +374,31 @@ void SimpleSCCPAnalysis::visit(const Instruction &I)
 
   //* ASSIGNMENT - Algorithm 2
   //******************************** ASSIGNMENT ********************************
+  Value *Key = const_cast<Instruction *>(&I);
+  auto FoundIt = DataflowFacts.find(Key);
+  if (FoundIt != DataflowFacts.end())
+    OldLatticeValue = FoundIt->getSecond();
 
+  errs() << "    visit " << getId(&I) << "  old=" << OldLatticeValue
+         << "  new=" << NewLatticeValue;
+  if (NewLatticeValue == OldLatticeValue)
+  {
+    errs() << "  (unchanged)\n";
+    return;
+  }
+  errs() << "  (CHANGED)\n";
+
+  DataflowFacts[Key] = NewLatticeValue;
+
+  // Propagate the change along outgoing SSA edges (uses of this instruction).
+  for (const User *U : I.users())
+  {
+    if (const Instruction *UserInst = dyn_cast<Instruction>(U))
+    {
+      errs() << "      SSA-push " << getId(UserInst) << "\n";
+      SSAWorkset.insert(UserInst);
+    }
+  }
   //****************************** ASSIGNMENT END ******************************
 }
 
