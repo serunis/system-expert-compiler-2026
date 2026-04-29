@@ -300,6 +300,7 @@ void SimpleSCCPAnalysis::analyze(Function &F)
         continue;
 
       bool FirstVisit = !isExecutableBlock(*DestBlock);
+      errs() << "[CFG-pop] " << Edge << (FirstVisit ? "  (first visit)\n" : "  (revisit)\n");
 
       // Mark the edge as executable.
       ExecutableEdges.insert(Edge);
@@ -342,6 +343,7 @@ void SimpleSCCPAnalysis::analyze(Function &F)
       // Pop one SSA element.
       const Instruction *I = *SSAWorkset.begin();
       SSAWorkset.erase(I);
+      errs() << "[SSA-pop] " << getId(I) << "\n";
 
       if (isa<PHINode>(I))
       {
@@ -352,6 +354,8 @@ void SimpleSCCPAnalysis::analyze(Function &F)
         // Non-PHI instructions matter only if their block is reachable.
         if (isExecutableBlock(*I->getParent()))
           visit(*I);
+        else
+          errs() << "    (parent block not executable, skipped)\n";
       }
     }
     //***************************** ASSIGNMENT END *****************************
@@ -375,8 +379,14 @@ void SimpleSCCPAnalysis::visit(const Instruction &I)
   if (FoundIt != DataflowFacts.end())
     OldLatticeValue = FoundIt->getSecond();
 
+  errs() << "    visit " << getId(&I) << "  old=" << OldLatticeValue
+         << "  new=" << NewLatticeValue;
   if (NewLatticeValue == OldLatticeValue)
+  {
+    errs() << "  (unchanged)\n";
     return;
+  }
+  errs() << "  (CHANGED)\n";
 
   DataflowFacts[Key] = NewLatticeValue;
 
@@ -384,7 +394,10 @@ void SimpleSCCPAnalysis::visit(const Instruction &I)
   for (const User *U : I.users())
   {
     if (const Instruction *UserInst = dyn_cast<Instruction>(U))
+    {
+      errs() << "      SSA-push " << getId(UserInst) << "\n";
       SSAWorkset.insert(UserInst);
+    }
   }
   //****************************** ASSIGNMENT END ******************************
 }
